@@ -15,20 +15,25 @@ use Symfony\Component\Console\Input\InputOption;
 use DB;
 use Illuminate\Support\Str;
 use App\Models\TeamUser;
+use App\Models\Team;
 
 use Illuminate\Validation\ValidationException;
 use Illuminate\Validation\Rule;
-
-
-
-
-
+use App\Models\TeamHasPeoples;
 use Illuminate\Validation\Rules;
 
+use App\Traits\AgentActivityColumns;
+use App\Traits\BuiltUserRecord;
+use App\Traits\LeadSourceColumn;
+use App\Traits\PreActionPlans;
+use App\Traits\PreEmailTemplate;
+use App\Traits\SetSmartList;
+use App\Models\EmailTemplate;
+use App\Mailer\SendGridMailFactory;
 
 class MakeUser extends Command
 {
-    use RunsInPlease, ValidatesInput;
+    use RunsInPlease, ValidatesInput, BuiltUserRecord, PreEmailTemplate, LeadSourceColumn, AgentActivityColumns, PreActionPlans ,SetSmartList;
 
     /**
      * The name of the console command.
@@ -241,9 +246,13 @@ class MakeUser extends Command
 
     public function createWebsite()
     {
+        $trial_days = date('t');
+        $trial_ends_at = date('Y-m-d H:i:s', strtotime('+' . $trial_days . ' days'));
+
         $data_w['user_id']= $this->user_id;
         $data_w['name']= $this->website_name;
         $data_w['website_url']= $this->website_url;
+        $data_w['trial_ends_at']= $trial_ends_at;
         $data_w['personal_team']= 1;
 
         DB::table('teams')->insert($data_w);
@@ -254,9 +263,48 @@ class MakeUser extends Command
         ->update([
             'current_team_id' => $current_team_id,
             'pause_lead' => 1,
-            'remember_token' => Str::random(10)
+            'remember_token' => Str::random(10),
+            'pause_lead' => '1'
          ]);
-         TeamUser::insert(['team_id'=>$current_team_id,'user_id'=>$this->user_id,'role'=>'owner']);
+         $user = User::query()->where('id',$this->user_id)->first();
+         $team = Team::query()->where('id',$current_team_id)->first();
+
+     
+       
+        $this->generate($team, $user, 'register');
+        $this->generateEmailTemplates($team, $user);
+        $this->createLeadSourceReporting($team->id);
+        $this->createAgentActivityReporting($team->id);
+        $this->createActionPlans($team->id);
+        $this->generateSmartList($team->id);
+        // $this->sendEmail($user);
+
+    }
+
+    protected function sendEmail($user)
+    {
+        $data = [];
+        $email_template = EmailTemplate::where('name', EmailTemplate::WELCOME_EMAIL)->first();
+
+        if ($email_template) {
+            try {
+                $data['subject'] = $email_template->subject;
+                $content = $email_template->content;
+                $content = str_replace('%user_name%', $user->name, $content);
+                $content = str_replace('%email%', $user->email, $content);
+                $content = str_replace('%url%', route('dashboard'), $content);
+                $data['body'] = $content;
+                $mail_data = [
+                    'subject' => $data['subject'],
+                    'to' => [$user->email],
+                    'content' => $data['body'],
+                ];
+
+                SendGridMailFactory::send($mail_data);
+            } catch (Exception $exception) {
+                session()->flash('error', $exception->getMessage());
+            }
+        }
     }
     /**
      * Check if email validation fails.
